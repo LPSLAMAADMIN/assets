@@ -1,0 +1,447 @@
+name: Security Analysis Pipeline
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'contracts/**'
+      - 'security/**'
+      - '.github/workflows/security-analysis.yml'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'contracts/**'
+      - 'security/**'
+      - '.github/workflows/security-analysis.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+env:
+  SOLC_VERSION: "0.5.16"
+  NODE_VERSION: "18"
+
+jobs:
+  # ============================================================
+  # Job 1: Slither Static Analysis
+  # ============================================================
+  slither:
+    name: Slither Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Dependencies
+        run: |
+          npm init -y
+          npm install --save-dev hardhat @nomiclabs/hardhat-ethers ethers
+
+      - name: Create Hardhat Config
+        run: |
+          cat > hardhat.config.js << 'EOF'
+          module.exports = {
+            solidity: {
+              version: "0.5.16",
+              settings: {
+                optimizer: { enabled: true, runs: 200 }
+              }
+            },
+            paths: {
+              sources: "./contracts",
+              tests: "./test",
+              cache: "./cache",
+              artifacts: "./artifacts"
+            }
+          };
+          EOF
+
+      - name: Install solc 0.5.16
+        run: |
+          pip3 install solc-select
+          solc-select install 0.5.16
+          solc-select use 0.5.16
+
+      - name: Run Slither
+        uses: crytic/slither-action@v0.4.0
+        id: slither
+        with:
+          target: 'contracts/'
+          sarif: 'security/results/slither-report.sarif'
+          slither-args: '--json security/results/slither-report.json --checklist'
+          solc-version: '0.5.16'
+          fail-on: 'none'
+
+      - name: Upload Slither SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: security/results/slither-report.sarif
+          category: slither
+
+      - name: Upload Slither Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slither-results
+          path: security/results/slither-*
+
+      - name: Print Slither Summary
+        if: always()
+        run: |
+          echo "## Slither Analysis Complete"
+          if [ -f security/results/slither-report.json ]; then
+            echo "Results saved to security/results/slither-report.json"
+            python3 -c "
+          import json, sys
+          with open('security/results/slither-report.json') as f:
+              data = json.load(f)
+          if 'results' in data and 'detectors' in data['results']:
+              detectors = data['results']['detectors']
+              high = sum(1 for d in detectors if d.get('impact') == 'High')
+              med = sum(1 for d in detectors if d.get('impact') == 'Medium')
+              low = sum(1 for d in detectors if d.get('impact') == 'Low')
+              info = sum(1 for d in detectors if d.get('impact') == 'Informational')
+              print(f'High: {high} | Medium: {med} | Low: {low} | Info: {info}')
+              print(f'Total findings: {len(detectors)}')
+          " || echo "Could not parse JSON report"
+          fi
+
+  # ============================================================
+  # Job 2: Mythril Symbolic Execution
+  # ============================================================
+  mythril:
+    name: Mythril Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Mythril
+        run: |
+          pip install mythril
+          pip install solc-select
+          solc-select install 0.5.16
+          solc-select use 0.5.16
+
+      - name: Create Results Directory
+        run: mkdir -p security/results
+
+      - name: Run Mythril Analysis
+        run: |
+          echo "## Running Mythril on BEP20Token.sol"
+          myth analyze contracts/BEP20Token.sol \
+            --solv 0.5.16 \
+            --execution-timeout 300 \
+            --max-depth 50 \
+            --solver-timeout 25000 \
+            -o json > security/results/mythril-report.json 2>&1 || true
+
+          echo "## Mythril JSON report generated"
+
+      - name: Generate Mythril SARIF
+        if: always()
+        run: |
+          python3 << 'EOF'
+          import json, sys
+
+          sarif = {
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{
+              "tool": {
+                "driver": {
+                  "name": "Mythril",
+                  "version": "0.24.x",
+                  "informationUri": "https://github.com/Consensys/mythril",
+                  "rules": []
+                }
+              },
+              "results": []
+            }]
+          }
+
+          try:
+            with open("security/results/mythril-report.json") as f:
+              data = json.load(f)
+
+            if isinstance(data, dict) and "issues" in data:
+              for issue in data["issues"]:
+                result = {
+                  "ruleId": issue.get("swc-id", "unknown"),
+                  "level": "warning" if issue.get("severity", "") == "Medium" else
+                           "error" if issue.get("severity", "") == "High" else "note",
+                  "message": {"text": issue.get("description", "No description")},
+                  "locations": [{
+                    "physicalLocation": {
+                      "artifactLocation": {"uri": issue.get("filename", "contracts/BEP20Token.sol")},
+                      "region": {"startLine": issue.get("lineno", 1)}
+                    }
+                  }]
+                }
+                sarif["runs"][0]["results"].append(result)
+          except Exception as e:
+            print(f"Warning: Could not parse Mythril output: {e}", file=sys.stderr)
+
+          with open("security/results/mythril-report.sarif", "w") as f:
+            json.dump(sarif, f, indent=2)
+
+          print(f"SARIF report generated with {len(sarif['runs'][0]['results'])} findings")
+          EOF
+
+      - name: Upload Mythril SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: security/results/mythril-report.sarif
+          category: mythril
+
+      - name: Upload Mythril Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mythril-results
+          path: security/results/mythril-*
+
+      - name: Print Mythril Summary
+        if: always()
+        run: |
+          echo "## Mythril Analysis Complete"
+          if [ -f security/results/mythril-report.json ]; then
+            python3 -c "
+          import json
+          with open('security/results/mythril-report.json') as f:
+              data = json.load(f)
+          if isinstance(data, dict) and 'issues' in data:
+              issues = data['issues']
+              print(f'Issues found: {len(issues)}')
+              for i in issues:
+                  print(f\"  [{i.get('severity','?')}] {i.get('title','unknown')}\")
+          elif isinstance(data, list):
+              print(f'Issues found: {len(data)}')
+          else:
+              print('No issues detected')
+          " || echo "Analysis complete (no parseable output)"
+          fi
+
+  # ============================================================
+  # Job 3: Echidna Fuzz Testing
+  # ============================================================
+  echidna:
+    name: Echidna Fuzz Testing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install solc
+        run: |
+          pip3 install solc-select
+          solc-select install 0.5.16
+          solc-select use 0.5.16
+
+      - name: Install Echidna
+        run: |
+          ECHIDNA_VERSION="2.2.3"
+          wget -q "https://github.com/crytic/echidna/releases/download/v${ECHIDNA_VERSION}/echidna-${ECHIDNA_VERSION}-x86_64-linux.tar.gz"
+          tar -xzf echidna-*.tar.gz
+          sudo mv echidna /usr/local/bin/
+          echidna --version
+
+      - name: Create Results Directory
+        run: mkdir -p security/results security/echidna-corpus
+
+      - name: Run Echidna Fuzz Tests
+        run: |
+          echo "## Running Echidna property-based fuzzing"
+          echidna security/echidna/EchidnaTest.sol \
+            --contract EchidnaTest \
+            --config security/echidna.config.yml \
+            --format text \
+            --test-limit 10000 \
+            --seq-len 50 \
+            2>&1 | tee security/results/echidna-report.txt || true
+
+      - name: Upload Echidna Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: echidna-results
+          path: |
+            security/results/echidna-*
+            security/echidna-corpus/
+
+      - name: Print Echidna Summary
+        if: always()
+        run: |
+          echo "## Echidna Fuzz Testing Complete"
+          if [ -f security/results/echidna-report.txt ]; then
+            tail -20 security/results/echidna-report.txt
+          fi
+
+  # ============================================================
+  # Job 4: Solidity Coverage & Gas Report
+  # ============================================================
+  coverage-gas:
+    name: Coverage & Gas Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Dependencies
+        run: |
+          npm init -y
+          npm install --save-dev \
+            hardhat \
+            @nomiclabs/hardhat-ethers \
+            @nomiclabs/hardhat-waffle \
+            ethereum-waffle \
+            ethers@5 \
+            chai \
+            solidity-coverage \
+            hardhat-gas-reporter \
+            hardhat-contract-sizer
+
+      - name: Create Hardhat Config with Plugins
+        run: |
+          cat > hardhat.config.js << 'EOF'
+          require("@nomiclabs/hardhat-waffle");
+          require("solidity-coverage");
+          require("hardhat-gas-reporter");
+          require("hardhat-contract-sizer");
+
+          module.exports = {
+            solidity: {
+              version: "0.5.16",
+              settings: {
+                optimizer: { enabled: true, runs: 200 }
+              }
+            },
+            paths: {
+              sources: "./contracts",
+              tests: "./test",
+              cache: "./cache",
+              artifacts: "./artifacts"
+            },
+            gasReporter: {
+              enabled: true,
+              currency: "USD",
+              outputFile: "security/results/gas-report.txt",
+              noColors: true,
+              coinmarketcap: process.env.CMC_API_KEY || ""
+            },
+            contractSizer: {
+              alphaSort: true,
+              disambiguatePaths: false,
+              runOnCompile: true,
+              strict: true
+            }
+          };
+          EOF
+
+      - name: Create Results Directory
+        run: mkdir -p security/results
+
+      - name: Run Solidity Coverage
+        run: |
+          echo "## Running Solidity Coverage"
+          npx hardhat coverage --solcoverjs .solcover.js 2>&1 | tee security/results/coverage-report.txt || true
+
+      - name: Run Gas Reporter
+        run: |
+          echo "## Running Gas Reporter"
+          REPORT_GAS=true npx hardhat test 2>&1 | tee -a security/results/gas-report.txt || true
+
+      - name: Run Contract Size Analysis
+        run: |
+          echo "## Contract Size Analysis"
+          npx hardhat size 2>&1 | tee security/results/contract-size-report.txt
+
+      - name: Upload Coverage & Gas Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-gas-results
+          path: |
+            security/results/coverage-report.txt
+            security/results/gas-report.txt
+            security/results/contract-size-report.txt
+            coverage/
+
+      - name: Print Summary
+        if: always()
+        run: |
+          echo "## Coverage & Gas Analysis Complete"
+          echo ""
+          echo "### Contract Sizes:"
+          cat security/results/contract-size-report.txt 2>/dev/null || echo "No size report"
+          echo ""
+          echo "### Gas Report:"
+          tail -30 security/results/gas-report.txt 2>/dev/null || echo "No gas report"
+
+  # ============================================================
+  # Job 5: Security Summary
+  # ============================================================
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [slither, mythril, echidna, coverage-gas]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results/
+
+      - name: Generate Security Summary
+        run: |
+          echo "# Security Analysis Summary" > security-summary.md
+          echo "" >> security-summary.md
+          echo "**Date:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> security-summary.md
+          echo "**Contract:** BEP20Token.sol (LPS Token)" >> security-summary.md
+          echo "**Solidity:** 0.5.16" >> security-summary.md
+          echo "**Chain:** BNB Smart Chain" >> security-summary.md
+          echo "" >> security-summary.md
+
+          echo "## Tool Results" >> security-summary.md
+          echo "" >> security-summary.md
+          echo "| Tool | Status |" >> security-summary.md
+          echo "|------|--------|" >> security-summary.md
+          echo "| Slither | ${{ needs.slither.result }} |" >> security-summary.md
+          echo "| Mythril | ${{ needs.mythril.result }} |" >> security-summary.md
+          echo "| Echidna | ${{ needs.echidna.result }} |" >> security-summary.md
+          echo "| Coverage/Gas | ${{ needs.coverage-gas.result }} |" >> security-summary.md
+          echo "" >> security-summary.md
+
+          echo "## Artifacts" >> security-summary.md
+          echo "All reports are available as workflow artifacts." >> security-summary.md
+          echo "" >> security-summary.md
+          echo "- slither-results/" >> security-summary.md
+          echo "- mythril-results/" >> security-summary.md
+          echo "- echidna-results/" >> security-summary.md
+          echo "- coverage-gas-results/" >> security-summary.md
+
+          cat security-summary.md
+
+      - name: Upload Summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-summary
+          path: security-summary.md

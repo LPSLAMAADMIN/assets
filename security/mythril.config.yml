@@ -1,0 +1,28 @@
+# Mythril Analysis Configuration
+# LPS Token (BEP20) - BNB Smart Chain
+
+analysis:
+  execution_timeout: 86400
+  max_depth: 50
+  solver_timeout: 25000
+  integer: true
+  reentrancy: true
+  ether_thief: true
+  suicide: true
+  delegatecall: true
+
+modules:
+  - ether_thief
+  - suicide
+  - delegatecall
+  - integer
+  - reentrancy
+  - unchecked_retval
+  - exceptions
+  - state_change_after_external_call
+  - multiple_sends
+  - tx_origin
+
+output:
+  format: json
+  file: security/results/mythril-report.json
