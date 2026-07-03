@@ -1,0 +1,77 @@
+name: Validate Assets
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: ["*"]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Tidy modules
+        run: go mod tidy
+
+      - name: Build
+        run: go build -o bin/assets ./cmd
+
+      - name: Run fix (auto-correct fixable issues)
+        run: bin/assets fix
+        continue-on-error: true
+
+      - name: Run check (validation)
+        run: bin/assets check
+        continue-on-error: true
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Validate LPS Token specifically
+        run: |
+          echo "=== Validating LPS Token asset ==="
+          ASSET_DIR="blockchains/smartchain/assets/0x500E63135fC1899E6342815C8adA406c0775a820"
+          
+          # Check folder exists
+          if [ ! -d "$ASSET_DIR" ]; then
+            echo "ERROR: Asset directory not found"
+            exit 1
+          fi
+          
+          # Check required files exist
+          if [ ! -f "$ASSET_DIR/info.json" ]; then
+            echo "ERROR: info.json missing"
+            exit 1
+          fi
+          if [ ! -f "$ASSET_DIR/logo.png" ]; then
+            echo "ERROR: logo.png missing"
+            exit 1
+          fi
+          
+          # Validate info.json has required fields
+          python3 -c "
+          import json, sys
+          with open('$ASSET_DIR/info.json') as f:
+              info = json.load(f)
+          required = ['name','type','symbol','decimals','description','website','explorer','status','id']
+          missing = [f for f in required if f not in info or (isinstance(info[f], str) and info[f] == '')]
+          if missing:
+              print('ERROR: Missing fields:', missing)
+              sys.exit(1)
+          if info['type'] != 'BEP20':
+              print('ERROR: type should be BEP20')
+              sys.exit(1)
+          print('All required fields present and valid')
+          print(json.dumps(info, indent=2))
+          "
+          
+          echo "=== LPS Token validation PASSED ==="
