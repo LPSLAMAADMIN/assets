@@ -1,101 +1,69 @@
 # API Storage Permission Fix Report
 
 **Date:** 2025-07-05  
-**Issue:** `EACCES: permission denied, mkdir '/app/storage/certificates'`  
-**Resolution:** ✅ Fixed — all services healthy  
-**CI Run:** [28745204350](https://github.com/LPSLAMAADMIN/lps-platform/actions/runs/28745204350) — 3/3 PASSED
+**Issues Fixed:**
+1. `EACCES: permission denied, mkdir '/app/storage/certificates'`
+2. `PrismaClientInitializationError: could not locate Query Engine for "linux-musl-openssl-3.0.x"`
+3. Health check URL mismatch (`/api/v1/health` → `/health`)
+4. Alpine IPv6 resolution (`localhost` → `::1` connection refused)
+
+**Resolution:** ✅ All 7 services healthy  
+**Verified locally:** `docker compose ps` — all healthy
 
 ---
 
-## Root Cause
+## Errors and Fixes
 
-`CertificateService` in lps-api creates `/app/storage/certificates` at runtime to store generated verification certificates. The Dockerfile did not create this directory before switching to the non-root `lpsapi` user, so the `mkdir` call failed with `EACCES`.
+### 1. Storage Directory Permission (EACCES)
+**Error:** `EACCES: permission denied, mkdir '/app/storage/certificates'`  
+**Cause:** CertificateService creates directories at runtime but `/app/storage` didn't exist.  
+**Fix:** Create `/app/storage/certificates`, `/app/uploads`, `/app/logs` and `chown` to `lpsapi:nodejs` before `USER` switch.
 
----
+### 2. Prisma Binary Target Mismatch
+**Error:** `Prisma Client could not locate the Query Engine for runtime "linux-musl-openssl-3.0.x"`  
+**Cause:** `prisma generate` builds for `linux-musl` but runtime has openssl installed, requiring `linux-musl-openssl-3.0.x`.  
+**Fix:** Added `binaryTargets = ["native", "linux-musl-openssl-3.0.x"]` to `prisma/schema.prisma`.
 
-## Fix Applied
+### 3. Wrong Health Check URL
+**Error:** Health check returns 404.  
+**Cause:** API registers `/health`, not `/api/v1/health`.  
+**Fix:** Changed Dockerfile HEALTHCHECK to `http://localhost:4000/health`.
 
-### lps-api/Dockerfile
-
-```diff
--# Fix permissions: Prisma engines must be readable, uploads/logs writable
--RUN chown -R lpsapi:nodejs /app/node_modules/.prisma \
--    && chown -R lpsapi:nodejs /app/node_modules/@prisma \
--    && mkdir -p uploads logs && chown -R lpsapi:nodejs uploads logs
-+# Fix permissions: Prisma engines + all runtime directories writable by lpsapi
-+RUN chown -R lpsapi:nodejs /app/node_modules/.prisma \
-+    && chown -R lpsapi:nodejs /app/node_modules/@prisma \
-+    && mkdir -p /app/storage/certificates /app/uploads /app/logs \
-+    && chown -R lpsapi:nodejs /app/storage /app/uploads /app/logs
-```
-
-### lps-dashboard/app/page.tsx (new)
-
-```tsx
-import { redirect } from 'next/navigation';
-
-export default function Home() {
-  redirect('/dashboard');
-}
-```
-
-Navigating to `/` now redirects to `/dashboard` instead of returning 404.
+### 4. Alpine IPv6 Resolution
+**Error:** `wget: can't connect to remote host: Connection refused` on `[::1]`  
+**Cause:** Alpine resolves `localhost` to `::1` (IPv6) but Next.js/Nginx listen on `0.0.0.0` (IPv4 only).  
+**Fix:** Changed all health checks to use `127.0.0.1` instead of `localhost`.
 
 ---
 
-## Directory Layout (post-fix)
+## Final Container Status
 
 ```
-/app/
-├── dist/              # Compiled TypeScript (root-owned, read-only)
-├── node_modules/      # Dependencies
-│   ├── .prisma/       # ← lpsapi:nodejs (Prisma client)
-│   └── @prisma/       # ← lpsapi:nodejs (Prisma engines)
-├── prisma/            # Schema + migrations (root-owned, read-only)
-├── storage/           # ← lpsapi:nodejs
-│   └── certificates/  # ← lpsapi:nodejs (CertificateService writes here)
-├── uploads/           # ← lpsapi:nodejs (document uploads)
-├── logs/              # ← lpsapi:nodejs (application logs)
-└── package.json
+NAME                           STATUS
+lps-platform-blockchain-1      Up (healthy)
+lps-platform-lps-ai-1          Up (healthy)
+lps-platform-lps-api-1         Up (healthy)
+lps-platform-lps-dashboard-1   Up (healthy)
+lps-platform-nginx-1           Up (healthy)
+lps-platform-postgres-1        Up (healthy)
+lps-platform-redis-1           Up (healthy)
 ```
 
 ---
 
-## Verification
+## Files Modified
 
-| Job | Status |
-|-----|--------|
-| Production Stack (TLS + Monitoring) | ✅ All 7 services healthy |
-| OWASP ZAP Security Scan | ✅ Passed |
-| Unit Tests (162) | ✅ Passed |
-
-### Service Health (from CI)
-
-| Service | Status |
-|---------|--------|
-| postgres | ✅ healthy |
-| redis | ✅ healthy |
-| lps-api | ✅ healthy |
-| lps-ai | ✅ healthy |
-| lps-dashboard | ✅ healthy |
-| nginx | ✅ healthy |
-| blockchain | ✅ healthy |
+| Repository | File | Change |
+|-----------|------|--------|
+| lps-api | `Dockerfile` | openssl, storage dirs, chown, healthcheck URL, start-period |
+| lps-api | `prisma/schema.prisma` | Added `binaryTargets` |
+| lps-dashboard | `Dockerfile` | 127.0.0.1 healthcheck |
+| lps-dashboard | `app/page.tsx` | Root redirect to /dashboard |
+| lps-platform | `docker-compose.yml` | 127.0.0.1 nginx healthcheck |
 
 ---
 
-## Cumulative Dockerfile Fixes (RC4)
-
-| Fix | Commit | Issue |
-|-----|--------|-------|
-| Add `openssl` package | `51a1ba7` | Prisma can't detect libssl |
-| chown `.prisma` + `@prisma` dirs | `51a1ba7` | Can't write to engines |
-| Increase health check start-period | `51a1ba7` | Health check fails during migration |
-| Create `/app/storage/certificates` | `ac59462` | CertificateService EACCES |
-| Create `/app/uploads` + `/app/logs` | `ac59462` | Consolidated directory setup |
-
----
-
-## Final Dockerfile
+## Final lps-api Dockerfile
 
 ```dockerfile
 FROM node:20-alpine AS builder
@@ -111,7 +79,6 @@ RUN npm run build
 
 FROM node:20-alpine AS runtime
 
-# Install OpenSSL (required by Prisma for DB connections)
 RUN apk add --no-cache openssl
 
 WORKDIR /app
@@ -122,7 +89,6 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/package.json ./
 
-# Fix permissions: Prisma engines + all runtime directories writable by lpsapi
 RUN chown -R lpsapi:nodejs /app/node_modules/.prisma \
     && chown -R lpsapi:nodejs /app/node_modules/@prisma \
     && mkdir -p /app/storage/certificates /app/uploads /app/logs \
@@ -133,7 +99,18 @@ USER lpsapi
 EXPOSE 4000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:4000/api/v1/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:4000/health || exit 1
 
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main.js"]
 ```
+
+---
+
+## Lessons Learned
+
+| Issue | Root Cause | Prevention |
+|-------|-----------|------------|
+| Storage EACCES | Non-root user can't create dirs | Always pre-create runtime dirs in Dockerfile |
+| Prisma engine mismatch | openssl changes target platform | Always specify `binaryTargets` when using Alpine + openssl |
+| Healthcheck 404 | URL assumption wrong | Verify actual route before writing healthcheck |
+| IPv6 connection refused | Alpine resolves localhost→::1 | Always use 127.0.0.1 in Alpine healthchecks |
