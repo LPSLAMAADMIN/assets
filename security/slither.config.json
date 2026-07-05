@@ -1,0 +1,16 @@
+{
+  "detectors_to_run": "all",
+  "exclude_informational": false,
+  "exclude_low": false,
+  "exclude_medium": false,
+  "exclude_high": false,
+  "solc_remaps": [],
+  "solc_args": "",
+  "disable_color": false,
+  "filter_paths": "node_modules",
+  "legacy_ast": false,
+  "exclude_dependencies": true,
+  "generate_patches": true,
+  "sarif": "security/results/slither-report.sarif",
+  "json": "security/results/slither-report.json"
+}

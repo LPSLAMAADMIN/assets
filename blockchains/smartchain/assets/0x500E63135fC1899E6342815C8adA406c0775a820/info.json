@@ -1,0 +1,13 @@
+{
+  "name": "LPS Token",
+  "type": "BEP20",
+  "symbol": "LPS",
+  "decimals": 18,
+  "description": "Luxury Property Solutions LLC Token",
+  "website": "https://LPSLAMA.com",
+  "explorer": "https://bscscan.com/token/0x500E63135fC1899E6342815C8adA406c0775a820",
+  "status": "active",
+  "id": "0x500E63135fC1899E6342815C8adA406c0775a820",
+  "links": [],
+  "tags": []
+}

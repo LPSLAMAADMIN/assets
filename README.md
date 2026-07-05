@@ -76,6 +76,41 @@ Trust Wallet team reserves the right to change the terms of asset submissions at
 
 Additionally, spam-like behavior, including but not limited to mass distribution of tokens to random addresses will result in the asset being flagged as spam and possible removal from the repository.
 
+## LPS Platform — Production Deployment
+
+The LPS Platform (v1.0.0-rc4) is production-ready. Deploy the full stack:
+
+```bash
+git clone https://github.com/LPSLAMAADMIN/lps-platform.git
+cd lps-platform
+git checkout v1.0.0-rc4
+
+./scripts/init-secrets.sh
+# Edit .env with production values
+
+docker compose -f docker-compose.yml -f docker-compose.production.yml up -d
+./scripts/migrate.sh deploy
+./scripts/health-check.sh
+```
+
+See [Infrastructure Guide](INFRASTRUCTURE_GUIDE.md) for full details.
+
+## LPS Platform Documentation
+
+| Document | Description |
+|----------|-------------|
+| [RC4 Certification](RC4_CERTIFICATION.md) | Production readiness certification (97/100) |
+| [Security Hardening Report](SECURITY_HARDENING_REPORT.md) | TLS, penetration testing, container security |
+| [Infrastructure Guide](INFRASTRUCTURE_GUIDE.md) | Architecture, deployment, operations |
+| [Monitoring Guide](MONITORING_GUIDE.md) | Prometheus, Grafana, Alertmanager, Loki |
+| [Production Checklist](PRODUCTION_CHECKLIST.md) | Pre/post-deployment checklist |
+| [Go-Live Checklist](GO_LIVE_CHECKLIST.md) | Required steps before live customer data |
+| [Release Notes v1.0.0-rc4](RELEASE_NOTES_v1.0.0-rc4.md) | Full release changelog |
+| [Architecture](ARCHITECTURE.md) | System architecture |
+| [Deployment Guide](DEPLOYMENT_GUIDE.md) | Step-by-step deployment |
+| [Operations Manual](OPERATIONS_MANUAL.md) | Day-to-day operations |
+| [Known Limitations](KNOWN_LIMITATIONS.md) | Current limitations |
+
 ## License
 
 The scripts and documentation in this project are released under the [MIT License](LICENSE)

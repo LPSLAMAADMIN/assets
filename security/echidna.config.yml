@@ -1,0 +1,20 @@
+# Echidna Fuzz Testing Configuration
+# LPS Token (BEP20) - BNB Smart Chain
+
+testMode: "property"
+testLimit: 50000
+seqLen: 100
+shrinkLimit: 5000
+deployer: "0x10000"
+sender:
+  - "0x20000"
+  - "0x30000"
+  - "0x40000"
+balanceContract: 0
+balanceAddr: 0xffffffffffffffffffffffff
+solcArgs: "--optimize --optimize-runs 200"
+coverage: true
+corpusDir: "security/echidna-corpus"
+quiet: false
+format: "text"
+workers: 4
